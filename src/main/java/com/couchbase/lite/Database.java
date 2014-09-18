@@ -551,12 +551,14 @@ public final class Database {
         if(view != null) {
             return view;
         }
-        view = new View(this, name);
-        if(view.getViewId() == 0) {
-            return null;
-        }
 
-        return registerView(view);
+        //view is not in cache but it maybe in DB
+        view = new View(this, name);
+        if(view.getViewId() > 0) {
+            return view;
+        }
+        
+        return null;
     }
 
     /**
@@ -811,7 +813,7 @@ public final class Database {
      * @exclude
      */
     @InterfaceAudience.Private
-    protected void clearDocumentCache() {
+    public void clearDocumentCache() {
         docCache.clear();
     }
 
@@ -2130,6 +2132,11 @@ public final class Database {
     public Status deleteViewNamed(String name) {
         Status result = new Status(Status.INTERNAL_SERVER_ERROR);
         try {
+            if(views != null) {
+                if(name != null) {
+                    views.remove(name);
+                }
+            }
             String[] whereArgs = { name };
             int rowsAffected = database.delete("views", "name=?", whereArgs);
             if(rowsAffected > 0) {
@@ -2293,10 +2300,10 @@ public final class Database {
                             long docNumericID = getDocNumericID(docId);
                             if (docNumericID > 0) {
                                 boolean deleted;
-                                List<Boolean> outIsDeleted = new ArrayList<Boolean>();
-                                List<Boolean> outIsConflict = new ArrayList<Boolean>();
+                                AtomicBoolean outIsDeleted = new AtomicBoolean(false);
+                                AtomicBoolean outIsConflict = new AtomicBoolean();
                                 String revId = winningRevIDOfDoc(docNumericID, outIsDeleted, outIsConflict);
-                                if (outIsDeleted.size() > 0) {
+                                if (outIsDeleted.get()) {
                                     deleted = true;
                                 }
                                 if (revId != null) {
@@ -2339,7 +2346,7 @@ public final class Database {
      * @exclude
      */
     @InterfaceAudience.Private
-    String winningRevIDOfDoc(long docNumericId, List<Boolean> outIsDeleted, List<Boolean> outIsConflict) throws CouchbaseLiteException {
+    String winningRevIDOfDoc(long docNumericId, AtomicBoolean outIsDeleted, AtomicBoolean outIsConflict) throws CouchbaseLiteException {
 
         Cursor cursor = null;
         String sql = "SELECT revid, deleted FROM revs" +
@@ -2352,21 +2359,17 @@ public final class Database {
         try {
             cursor = database.rawQuery(sql, args);
 
-            cursor.moveToNext();
-            if (!cursor.isAfterLast()) {
+            if (cursor.moveToNext()) {
                 revId = cursor.getString(0);
-                boolean deleted = cursor.getInt(1) > 0;
-                if (deleted) {
-                    outIsDeleted.add(true);
-                }
+                outIsDeleted.set(cursor.getInt(1) > 0);
                 // The document is in conflict if there are two+ result rows that are not deletions.
-                boolean hasNextResult = cursor.moveToNext();
-                if (hasNextResult) {
-                    boolean isNextDeleted = cursor.getInt(1) > 0;
-                    boolean isInConflict = !deleted && hasNextResult && !isNextDeleted;
-                    if (isInConflict) {
-                        outIsConflict.add(true);
-                    }
+                if(outIsConflict != null) {
+                    outIsConflict.set(!outIsDeleted.get() && cursor.moveToNext() && !(cursor.getInt(1) > 0));
+                }
+            } else {
+                outIsDeleted.set(false);
+                if(outIsConflict != null) {
+                    outIsConflict.set(false);
                 }
             }
 
@@ -2790,35 +2793,29 @@ public final class Database {
      * @exclude
      */
     @InterfaceAudience.Private
-    void stubOutAttachmentsInRevision(Map<String, AttachmentInternal> attachments, RevisionInternal rev) {
+    void stubOutAttachmentsInRevision(final Map<String, AttachmentInternal> attachments, final RevisionInternal rev) {
 
-        Map<String, Object> properties = rev.getProperties();
-        Map<String, Object> attachmentsFromProps =  (Map<String, Object>) properties.get("_attachments");
-        if (attachmentsFromProps != null) {
-            for (String attachmentKey : attachmentsFromProps.keySet()) {
-                Map<String, Object> attachmentFromProps = (Map<String, Object>) attachmentsFromProps.get(attachmentKey);
-                if (attachmentFromProps.get("follows") != null || attachmentFromProps.get("data") != null) {
-
-                    attachmentFromProps.remove("follows");
-                    attachmentFromProps.remove("data");
-
-                    attachmentFromProps.put("stub", true);
-                    if (attachmentFromProps.get("revpos") == null) {
-                        attachmentFromProps.put("revpos",rev.getGeneration());
+        rev.mutateAttachments(new CollectionUtils.Functor<Map<String, Object>, Map<String, Object>>() {
+            public Map<String, Object> invoke(Map<String, Object> attachment) {
+                if (attachment.containsKey("follows") || attachment.containsKey("data")) {
+                    Map<String, Object> editedAttachment = new HashMap<String, Object>(attachment);
+                    editedAttachment.remove("follows");
+                    editedAttachment.remove("data");
+                    editedAttachment.put("stub",true);
+                    if(!editedAttachment.containsKey("revpos")) {
+                        editedAttachment.put("revpos",rev.getGeneration());
                     }
 
-                    AttachmentInternal attachmentObject = attachments.get(attachmentKey);
-                    if (attachmentObject != null) {
-                        attachmentFromProps.put("length", attachmentObject.getLength());
-                        if (attachmentObject.getBlobKey() != null){
-                            // case with Large Attachment
-                            attachmentFromProps.put("digest", attachmentObject.getBlobKey().base64Digest());
-                        }
+                    AttachmentInternal attachmentObject = attachments.get(name);
+                    if(attachmentObject != null) {
+                        editedAttachment.put("length",attachmentObject.getLength());
+                        editedAttachment.put("digest", attachmentObject.getBlobKey().base64Digest());
                     }
-                    attachmentsFromProps.put(attachmentKey, attachmentFromProps);
+                    attachment = editedAttachment;
                 }
+                return attachment;
             }
-        }
+        });
 
     }
 
@@ -3455,23 +3452,14 @@ public final class Database {
 
         long docNumericID = (docId != null) ? getDocNumericID(docId) : 0;
         long parentSequence = 0;
+        AtomicBoolean oldWinnerWasDeletion = new AtomicBoolean(false);
+        AtomicBoolean wasConflicted = new AtomicBoolean(false);
         String oldWinningRevID = null;
 
         try {
-
-            boolean oldWinnerWasDeletion = false;
-            boolean wasConflicted = false;
             if (docNumericID > 0) {
-                List<Boolean> outIsDeleted = new ArrayList<Boolean>();
-                List<Boolean> outIsConflict = new ArrayList<Boolean>();
                 try {
-                    oldWinningRevID = winningRevIDOfDoc(docNumericID, outIsDeleted, outIsConflict);
-                    if (outIsDeleted.size() > 0) {
-                        oldWinnerWasDeletion = true;
-                    }
-                    if (outIsConflict.size() > 0) {
-                        wasConflicted = true;
-                    }
+                    oldWinningRevID = winningRevIDOfDoc(docNumericID, oldWinnerWasDeletion, wasConflicted);
 
                 } catch (Exception e) {
                     e.printStackTrace();
@@ -3533,7 +3521,7 @@ public final class Database {
                     } else {
 
                         // Doc ID exists; check whether current winning revision is deleted:
-                        if (oldWinnerWasDeletion == true) {
+                        if (oldWinnerWasDeletion.get() == true) {
                             prevRevId = oldWinningRevID;
                             parentSequence = getSequenceOfDocument(docNumericID, prevRevId, false);
 
@@ -3556,7 +3544,7 @@ public final class Database {
 
             // There may be a conflict if (a) the document was already in conflict, or
             // (b) a conflict is created by adding a non-deletion child of a non-winning rev.
-            inConflict = wasConflicted ||
+            inConflict = wasConflicted.get() ||
                     (!deleted &&
                             prevRevId != null &&
                             oldWinningRevID != null &&
@@ -3594,13 +3582,9 @@ public final class Database {
                 json = new byte[0];
 
             //// PART III: In which the actual insertion finally takes place:
-
-            int attachmentSize = attachments.size();
-            boolean hasAttachments = attachments.size() > 0;
-
             // Now insert the rev itself:
-            long newSequence = insertRevision(newRev, docNumericID, parentSequence, true, (attachments.size() > 0), json);
-            if(newSequence == 0) {
+            long newSequence = insertRevision(newRev, docNumericID, parentSequence, true, (attachments != null), json);
+            if(newSequence <= 0) {
                 return null;
             }
 
@@ -3622,7 +3606,7 @@ public final class Database {
 
 
             // Figure out what the new winning rev ID is:
-            winningRev = winner(docNumericID, oldWinningRevID, oldWinnerWasDeletion, newRev);
+            winningRev = winner(docNumericID, oldWinningRevID, oldWinnerWasDeletion.get(), newRev);
 
             // Success!
             if(deleted) {
@@ -3672,8 +3656,8 @@ public final class Database {
             }
         } else {
             // Doc was alive. How does this deletion affect the winning rev ID?
-            List<Boolean> outIsDeleted = new ArrayList<Boolean>();
-            List<Boolean> outIsConflict = new ArrayList<Boolean>();
+            AtomicBoolean outIsDeleted = new AtomicBoolean(false);
+            AtomicBoolean outIsConflict = new AtomicBoolean(false);
             String winningRevID = winningRevIDOfDoc(docNumericID, outIsDeleted, outIsConflict);
             if (!winningRevID.equals(oldWinningRevID)) {
                 if (winningRevID.equals(newRev.getRevId())) {
@@ -3856,14 +3840,14 @@ public final class Database {
                 validateRevision(rev, oldRev, parentRevId);
             }
 
-            List<Boolean> outIsDeleted = new ArrayList<Boolean>();
-            List<Boolean> outIsConflict = new ArrayList<Boolean>();
+            AtomicBoolean outIsDeleted = new AtomicBoolean(false);
+            AtomicBoolean outIsConflict = new AtomicBoolean(false);
             boolean oldWinnerWasDeletion = false;
             String oldWinningRevID = winningRevIDOfDoc(docNumericID, outIsDeleted, outIsConflict);
-            if (outIsDeleted.size() > 0) {
+            if (outIsDeleted.get()) {
                 oldWinnerWasDeletion = true;
             }
-            if (outIsConflict.size() > 0) {
+            if (outIsConflict.get()) {
                inConflict = true;
             }
 
@@ -3906,7 +3890,7 @@ public final class Database {
                     }
 
                     // Insert it:
-                    sequence = insertRevision(newRev, docNumericID, sequence, current, (getAttachmentsFromRevision(newRev).size() > 0), data);
+                    sequence = insertRevision(newRev, docNumericID, sequence, current, (newRev.getAttachments().size() > 0), data);
 
                     if(sequence <= 0) {
                         throw new CouchbaseLiteException(Status.INTERNAL_SERVER_ERROR);

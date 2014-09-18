@@ -80,6 +80,8 @@ public class ChangeTracker implements Runnable {
     private boolean usePOST;
     private int heartBeatSeconds;
     private int limit;
+    private boolean caughtUp = false;
+    private boolean continuous = false;  // is enclosing replication continuous?
 
     private Authenticator authenticator;
 
@@ -99,6 +101,14 @@ public class ChangeTracker implements Runnable {
         this.requestHeaders = new HashMap<String, Object>();
         this.heartBeatSeconds = 300;
         this.limit = 50;
+    }
+
+    public boolean isContinuous() {
+        return continuous;
+    }
+
+    public void setContinuous(boolean continuous) {
+        this.continuous = continuous;
     }
 
     public void setFilterName(String filterName) {
@@ -309,8 +319,10 @@ public class ChangeTracker implements Runnable {
                     Log.e(Log.TAG_CHANGE_TRACKER, "%s: Change tracker got error %d", this, status.getStatusCode());
                     this.error = new HttpResponseException(status.getStatusCode(), status.getReasonPhrase());
                     stop();
+                    return;
                 }
                 HttpEntity entity = response.getEntity();
+                Log.v(Log.TAG_CHANGE_TRACKER, "%s: got response. status: %s mode: %s", this, status, mode);
                 InputStream input = null;
                 if (entity != null) {
                     try {
@@ -319,11 +331,20 @@ public class ChangeTracker implements Runnable {
                             Map<String, Object> fullBody = Manager.getObjectMapper().readValue(input, Map.class);
                             boolean responseOK = receivedPollResponse(fullBody);
                             if (mode == ChangeTrackerMode.LongPoll && responseOK) {
+
+                                // TODO: this logic is questionable, there's lots
+                                // TODO: of differences in the iOS changetracker code,
+                                if (!caughtUp) {
+                                    caughtUp = true;
+                                    client.changeTrackerCaughtUp();
+                                }
+
                                 Log.v(Log.TAG_CHANGE_TRACKER, "%s: Starting new longpoll", this);
                                 backoff.resetBackoff();
                                 continue;
                             } else {
                                 Log.w(Log.TAG_CHANGE_TRACKER, "%s: Change tracker calling stop (LongPoll)", this);
+                                client.changeTrackerFinished(this);
                                 stop();
                             }
                         } else {  // one-shot replications
@@ -343,9 +364,19 @@ public class ChangeTracker implements Runnable {
 
                             }
 
-                            Log.w(Log.TAG_CHANGE_TRACKER, "%s: Change tracker calling stop (OneShot)", this);
-                            stop();
-                            break;
+                            if (!caughtUp) {
+                                caughtUp = true;
+                                client.changeTrackerCaughtUp();
+                            }
+
+                            if (isContinuous()) {  // if enclosing replication is continuous
+                                mode = ChangeTrackerMode.LongPoll;
+                            } else {
+                                Log.w(Log.TAG_CHANGE_TRACKER, "%s: Change tracker calling stop (OneShot)", this);
+                                client.changeTrackerFinished(this);
+                                stopped();
+                                break;  // break out of while (running) loop
+                            }
 
                         }
 
@@ -407,6 +438,7 @@ public class ChangeTracker implements Runnable {
     }
 
     public boolean start() {
+        Log.d(Log.TAG_CHANGE_TRACKER, "%s: Changed tracker asked to start", this);
         this.error = null;
         String maskedRemoteWithoutCredentials = databaseURL.toExternalForm();
         maskedRemoteWithoutCredentials = maskedRemoteWithoutCredentials.replaceAll("://.*:.*@", "://---:---@");
@@ -420,6 +452,7 @@ public class ChangeTracker implements Runnable {
         running = false;
         thread.interrupt();
         if(request != null) {
+            Log.d(Log.TAG_CHANGE_TRACKER, "%s: Changed tracker aborting request: %s", this, request);
             request.abort();
         }
 
@@ -427,9 +460,12 @@ public class ChangeTracker implements Runnable {
     }
 
     public void stopped() {
-        Log.d(Log.TAG_CHANGE_TRACKER, "%s: Change tracker in stopped", this);
+        Log.d(Log.TAG_CHANGE_TRACKER, "%s: Change tracker in stopped()", this);
         if (client != null) {
+            Log.w(Log.TAG_CHANGE_TRACKER, "%s: Change tracker calling changeTrackerStopped, client: %s", this, client);
             client.changeTrackerStopped(ChangeTracker.this);
+        } else {
+            Log.w(Log.TAG_CHANGE_TRACKER, "%s: Change tracker not calling changeTrackerStopped, client == null", this);
         }
         client = null;
     }

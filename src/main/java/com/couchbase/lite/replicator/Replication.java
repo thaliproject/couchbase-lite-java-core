@@ -114,9 +114,9 @@ public abstract class Replication implements NetworkReachabilityListener {
 
     protected CollectionUtils.Functor<RevisionInternal,RevisionInternal> revisionBodyTransformationBlock;
 
+    protected static int RETRY_DELAY = 60;
     protected static final int PROCESSOR_DELAY = 500;
     protected static final int INBOX_CAPACITY = 100;
-    protected static final int RETRY_DELAY = 60;
     protected static final int EXECUTOR_THREAD_POOL_SIZE = 5;
 
 
@@ -712,6 +712,7 @@ public abstract class Replication implements NetworkReachabilityListener {
      * @exclude
      */
     private void clearDbRef() {
+        Log.v(Log.TAG_SYNC, "%s: clearDbRef() called", this);
         if (savingCheckpoint && lastSequence != null && db != null) {
             if (!db.isOpen()) {
                 Log.w(Log.TAG_SYNC, "Not attempting to setLastSequence, db is closed");
@@ -720,6 +721,8 @@ public abstract class Replication implements NetworkReachabilityListener {
             }
             Log.v(Log.TAG_SYNC, "%s: clearDbRef() setting db to null", this);
             db = null;
+        } else {
+            Log.v(Log.TAG_SYNC, "%s: clearDbRef() not doing anything.  savingCheckpoint: %s lastSequence: %s db: %s", this, savingCheckpoint, lastSequence, db);
         }
     }
 
@@ -791,7 +794,7 @@ public abstract class Replication implements NetworkReachabilityListener {
     @InterfaceAudience.Private
     protected void checkSessionAtPath(final String sessionPath) {
 
-        Log.v(Log.TAG_SYNC, "%s | %s: checkSessionAtPath() calling asyncTaskStarted()", this, Thread.currentThread());
+        Log.v(Log.TAG_SYNC_ASYNC_TASK, "%s | %s: checkSessionAtPath() calling asyncTaskStarted()", this, Thread.currentThread());
 
         asyncTaskStarted();
         sendAsyncRequest("GET", sessionPath, null, new RemoteRequestCompletionBlock() {
@@ -827,7 +830,7 @@ public abstract class Replication implements NetworkReachabilityListener {
                     }
 
                 } finally {
-                    Log.v(Log.TAG_SYNC, "%s | %s: checkSessionAtPath() calling asyncTaskFinished()", this, Thread.currentThread());
+                    Log.v(Log.TAG_SYNC_ASYNC_TASK, "%s | %s: checkSessionAtPath() calling asyncTaskFinished()", this, Thread.currentThread());
 
                     asyncTaskFinished(1);
                 }
@@ -884,7 +887,7 @@ public abstract class Replication implements NetworkReachabilityListener {
 
         Log.d(Log.TAG_SYNC, "%s: Doing login with %s at %s", this, getAuthenticator().getClass(), loginPath);
 
-        Log.v(Log.TAG_SYNC, "%s | %s: login() calling asyncTaskStarted()", this, Thread.currentThread());
+        Log.v(Log.TAG_SYNC_ASYNC_TASK, "%s | %s: login() calling asyncTaskStarted()", this, Thread.currentThread());
 
         asyncTaskStarted();
         sendAsyncRequest("POST", loginPath, loginParameters, new RemoteRequestCompletionBlock() {
@@ -901,7 +904,7 @@ public abstract class Replication implements NetworkReachabilityListener {
                         fetchRemoteCheckpointDoc();
                     }
                 } finally {
-                    Log.v(Log.TAG_SYNC, "%s | %s: login() calling asyncTaskFinished()", this, Thread.currentThread());
+                    Log.v(Log.TAG_SYNC_ASYNC_TASK, "%s | %s: login() calling asyncTaskFinished()", this, Thread.currentThread());
 
                     asyncTaskFinished(1);
                 }
@@ -916,9 +919,9 @@ public abstract class Replication implements NetworkReachabilityListener {
      */
     @InterfaceAudience.Private
     public synchronized void asyncTaskStarted() {
-        Log.v(Log.TAG_SYNC, "%s: asyncTaskStarted %d -> %d", this, this.asyncTaskCount, this.asyncTaskCount + 1);
+        Log.v(Log.TAG_SYNC_ASYNC_TASK, "%s: asyncTaskStarted %d -> %d", this, this.asyncTaskCount, this.asyncTaskCount + 1);
         if (asyncTaskCount++ == 0) {
-            Log.v(Log.TAG_SYNC, "%s: asyncTaskStarted() calling updateActive()", this);
+            Log.v(Log.TAG_SYNC_ASYNC_TASK, "%s: asyncTaskStarted() calling updateActive()", this);
             updateActive();
         }
     }
@@ -928,11 +931,11 @@ public abstract class Replication implements NetworkReachabilityListener {
      */
     @InterfaceAudience.Private
     public synchronized void asyncTaskFinished(int numTasks) {
-        Log.v(Log.TAG_SYNC, "%s: asyncTaskFinished %d -> %d", this, this.asyncTaskCount, this.asyncTaskCount - numTasks);
+        Log.v(Log.TAG_SYNC_ASYNC_TASK, "%s: asyncTaskFinished %d -> %d", this, this.asyncTaskCount, this.asyncTaskCount - numTasks);
         this.asyncTaskCount -= numTasks;
         assert(asyncTaskCount >= 0);
         if (asyncTaskCount == 0) {
-            Log.v(Log.TAG_SYNC, "%s: asyncTaskFinished() calling updateActive()", this);
+            Log.v(Log.TAG_SYNC_ASYNC_TASK, "%s: asyncTaskFinished() calling updateActive()", this);
             updateActive();
         }
     }
@@ -954,9 +957,13 @@ public abstract class Replication implements NetworkReachabilityListener {
             if (active != newActive) {
                 Log.d(Log.TAG_SYNC, "%s: Progress: set active = %s asyncTaskCount: %d batcherCount: %d", this, newActive, asyncTaskCount, batcherCount);
                 active = newActive;
+                Log.d(Log.TAG_SYNC, "%s: Progress: active = %s", this, active);
                 notifyChangeListeners();
 
+                Log.d(Log.TAG_SYNC, "%s: Progress: active = %s ..", this, active);
                 if (!active) {
+                    Log.d(Log.TAG_SYNC, "%s: Progress: !active", this);
+
                     if (!continuous) {
                         Log.d(Log.TAG_SYNC, "%s since !continuous, calling stopped()", this);
                         stopped();
@@ -967,8 +974,12 @@ public abstract class Replication implements NetworkReachabilityListener {
                                 RETRY_DELAY);
                         cancelPendingRetryIfReady();
                         scheduleRetryIfReady();
+                    } else {
+                        Log.d(Log.TAG_SYNC, "%s since continuous and error == null, doing nothing", this);
                     }
 
+                } else {
+                    Log.d(Log.TAG_SYNC, "%s: Progress: active", this);
                 }
 
             } else {
@@ -1235,7 +1246,7 @@ public abstract class Replication implements NetworkReachabilityListener {
         String checkpointId = remoteCheckpointDocID();
         final String localLastSequence = db.lastSequenceWithCheckpointId(checkpointId);
 
-        Log.v(Log.TAG_SYNC, "%s | %s: fetchRemoteCheckpointDoc() calling asyncTaskStarted()", this, Thread.currentThread());
+        Log.v(Log.TAG_SYNC_ASYNC_TASK, "%s | %s: fetchRemoteCheckpointDoc() calling asyncTaskStarted()", this, Thread.currentThread());
 
         asyncTaskStarted();
         sendAsyncRequest("GET", "/_local/" + checkpointId, null, new RemoteRequestCompletionBlock() {
@@ -1267,7 +1278,7 @@ public abstract class Replication implements NetworkReachabilityListener {
                         beginReplicating();
                     }
                 } finally {
-                    Log.v(Log.TAG_SYNC, "%s | %s: fetchRemoteCheckpointDoc() calling asyncTaskFinished()", this, Thread.currentThread());
+                    Log.v(Log.TAG_SYNC_ASYNC_TASK, "%s | %s: fetchRemoteCheckpointDoc() calling asyncTaskFinished()", this, Thread.currentThread());
 
                     asyncTaskFinished(1);
                 }
@@ -1309,11 +1320,12 @@ public abstract class Replication implements NetworkReachabilityListener {
 
         savingCheckpoint = true;
         final String checkpointID = remoteCheckpointDocID;
-        Log.d(Log.TAG_SYNC, "%s: put remote _local document.  checkpointID: %s", this, checkpointID);
+        Log.d(Log.TAG_SYNC, "%s: start put remote _local document.  checkpointID: %s body: %s", this, checkpointID, body);
         sendAsyncRequest("PUT", "/_local/" + checkpointID, body, new RemoteRequestCompletionBlock() {
 
             @Override
             public void onCompletion(Object result, Throwable e) {
+                Log.d(Log.TAG_SYNC, "%s: put remote _local document request finished.  checkpointID: %s body: %s", this, checkpointID, body);
                 savingCheckpoint = false;
                 if (e != null) {
                     Log.w(Log.TAG_SYNC, "%s: Unable to save remote checkpoint", e, this);
@@ -1330,25 +1342,30 @@ public abstract class Replication implements NetworkReachabilityListener {
                     // Failed to save checkpoint:
                     switch (getStatusFromError(e)) {
                         case Status.NOT_FOUND:
+                            Log.i(Log.TAG_SYNC, "%s: could not save remote checkpoint: 404 NOT FOUND", this);
                             remoteCheckpoint = null;  // doc deleted or db reset
                             overdueForSave = true; // try saving again
                             break;
                         case Status.CONFLICT:
+                            Log.i(Log.TAG_SYNC, "%s: could not save remote checkpoint: 409 CONFLICT", this);
                             refreshRemoteCheckpointDoc();
                             break;
                         default:
+                            Log.i(Log.TAG_SYNC, "%s: could not save remote checkpoint: %s", this, e);
                             // TODO: On 401 or 403, and this is a pull, remember that remote
                             // TODo: is read-only & don't attempt to read its checkpoint next time.
                             break;
                     }
                 } else {
                     // Saved checkpoint:
+                    Log.i(Log.TAG_SYNC, "%s: saved remote checkpoint, updating local checkpoint", this);
                     Map<String, Object> response = (Map<String, Object>) result;
                     body.put("_rev", response.get("rev"));
                     remoteCheckpoint = body;
                     db.setLastSequence(lastSequence, checkpointID, !isPull());
                 }
                 if (overdueForSave) {
+                    Log.i(Log.TAG_SYNC, "%s: overdueForSave == true, calling saveLastSequence()", this);
                     saveLastSequence();
                 }
 
@@ -1367,6 +1384,13 @@ public abstract class Replication implements NetworkReachabilityListener {
         db.runAsync(new AsyncTask() {
             @Override
             public void run(Database database) {
+
+                // extra guard needed for https://github.com/couchbase/couchbase-lite-java-core/issues/253
+                if (!online) {
+                    Log.v(Log.TAG_SYNC, "%s: goOffline() callback called, but online == false. ignoring", Replication.this);
+                    return;
+                }
+
                 Log.d(Log.TAG_SYNC, "%s: Going offline", this);
                 online = false;
                 stopRemoteRequests();
@@ -1380,14 +1404,23 @@ public abstract class Replication implements NetworkReachabilityListener {
     @InterfaceAudience.Public
     public boolean goOnline() {
         if (online) {
+            Log.v(Log.TAG_SYNC, "%s: goOnline() called, but online == true. ignoring", this);
             return false;
         }
         if (db == null) {
+            Log.v(Log.TAG_SYNC, "%s: goOnline() called, but db == null. ignoring", this);
             return false;
         }
         db.runAsync(new AsyncTask() {
             @Override
             public void run(Database database) {
+
+                // extra guard needed for https://github.com/couchbase/couchbase-lite-java-core/issues/253
+                if (online) {
+                    Log.v(Log.TAG_SYNC, "%s: goOnline() callback called, but online == true. ignoring", Replication.this);
+                    return;
+                }
+
                 Log.d(Log.TAG_SYNC, "%s: Going online", this);
                 online = true;
 
@@ -1416,7 +1449,7 @@ public abstract class Replication implements NetworkReachabilityListener {
                 Log.d(Log.TAG_SYNC, "%s: remoteRequestExecutor.awaitTermination succeeded: %s", this, succeeded);
                 */
 
-                remoteRequestExecutor = Executors.newCachedThreadPool();
+                remoteRequestExecutor = Executors.newFixedThreadPool(EXECUTOR_THREAD_POOL_SIZE);
                 checkSession();
                 notifyChangeListeners();
             }
@@ -1569,7 +1602,7 @@ public abstract class Replication implements NetworkReachabilityListener {
     private void refreshRemoteCheckpointDoc() {
         Log.d(Log.TAG_SYNC, "%s: Refreshing remote checkpoint to get its _rev...", this);
         savingCheckpoint = true;
-        Log.v(Log.TAG_SYNC, "%s | %s: refreshRemoteCheckpointDoc() calling asyncTaskStarted()", this, Thread.currentThread());
+        Log.v(Log.TAG_SYNC_ASYNC_TASK, "%s | %s: refreshRemoteCheckpointDoc() calling asyncTaskStarted()", this, Thread.currentThread());
         asyncTaskStarted();
         sendAsyncRequest("GET", "/_local/" + remoteCheckpointDocID(), null, new RemoteRequestCompletionBlock() {
 
@@ -1590,7 +1623,7 @@ public abstract class Replication implements NetworkReachabilityListener {
                         saveLastSequence();  // try saving again
                     }
                 } finally {
-                    Log.v(Log.TAG_SYNC, "%s | %s: refreshRemoteCheckpointDoc() calling asyncTaskFinished()", this, Thread.currentThread());
+                    Log.v(Log.TAG_SYNC_ASYNC_TASK, "%s | %s: refreshRemoteCheckpointDoc() calling asyncTaskFinished()", this, Thread.currentThread());
 
                     asyncTaskFinished(1);
                 }
@@ -1611,7 +1644,7 @@ public abstract class Replication implements NetworkReachabilityListener {
                 return new Status(Status.OK);
             }
 
-            // 'status' property is nonstandard; TouchDB returns it, others don't.
+            // 'status' property is nonstandard; Couchbase Lite returns it, others don't.
             String statusString = (String) item.get("status");
             int status = Integer.parseInt(statusString);
             if (status >= 400) {
@@ -1624,6 +1657,10 @@ public abstract class Replication implements NetworkReachabilityListener {
                 return new Status(Status.FORBIDDEN);
             } else if (errorStr.equalsIgnoreCase("conflict")) {
                 return new Status(Status.CONFLICT);
+            } else if (errorStr.equalsIgnoreCase("missing")) {
+                return new Status(Status.NOT_FOUND);
+            } else if (errorStr.equalsIgnoreCase("not_found")) {
+                return new Status(Status.NOT_FOUND);
             } else {
                 return new Status(Status.UPSTREAM_ERROR);
             }
@@ -1672,4 +1709,11 @@ public abstract class Replication implements NetworkReachabilityListener {
     /* package */ HttpClientFactory getClientFactory() {
         return clientFactory;
     }
+
+    @InterfaceAudience.Private
+    /* package */ void setRetryDelay(int retryDelay) {
+        Replication.RETRY_DELAY = retryDelay;
+    }
+
+
 }
