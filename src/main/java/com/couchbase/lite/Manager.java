@@ -2,9 +2,9 @@ package com.couchbase.lite;
 
 import com.couchbase.lite.auth.Authorizer;
 import com.couchbase.lite.auth.AuthorizerFactoryManager; // https://github.com/couchbase/couchbase-lite-java-core/issues/41
+import com.couchbase.lite.auth.FacebookAuthorizer;
+import com.couchbase.lite.auth.PersonaAuthorizer;
 import com.couchbase.lite.internal.InterfaceAudience;
-import com.couchbase.lite.replicator.Puller;
-import com.couchbase.lite.replicator.Pusher;
 import com.couchbase.lite.replicator.Replication;
 import com.couchbase.lite.support.FileDirUtils;
 import com.couchbase.lite.support.HttpClientFactory;
@@ -24,10 +24,17 @@ import java.io.OutputStream;
 import java.net.MalformedURLException;
 import java.net.URL;
 import java.security.Principal; // https://github.com/couchbase/couchbase-lite-java-core/issues/39
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ThreadFactory;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -125,7 +132,17 @@ public final class Manager {
         }
 
         upgradeOldDatabaseFiles(directoryFile);
-        workExecutor = Executors.newSingleThreadScheduledExecutor();
+
+        // this must be a single threaded executor due to contract w/ Replication object
+        // which must run on either:
+        // - a shared single threaded executor
+        // - its own single threaded executor
+        workExecutor = Executors.newSingleThreadScheduledExecutor(new ThreadFactory() {
+            @Override
+            public Thread newThread(Runnable r) {
+                return new Thread(r, "CBLManagerWorkExecutor");
+            }
+        });
 
     }
 
@@ -360,6 +377,7 @@ public final class Manager {
         return databases.values();
     }
 
+
     /**
      * Asynchronously dispatches a callback to run on a background thread. The callback will be passed
      * Database instance.  There is not currently a known reason to use it, it may not make
@@ -419,10 +437,10 @@ public final class Manager {
         final boolean continuous = false;
 
         if (push) {
-            replicator = new Pusher(db, remote, continuous, getWorkExecutor());
+            replicator = new Replication(db, remote, Replication.Direction.PUSH, null, getWorkExecutor());
         }
         else {
-            replicator = new Puller(db, remote, continuous, getWorkExecutor());
+            replicator = new Replication(db, remote, Replication.Direction.PULL, null, getWorkExecutor());
         }
 
         replications.add(replicator);
@@ -544,6 +562,23 @@ public final class Manager {
             }
         }
 
+
+        Map<String, Object> authMap = (Map<String, Object>) replicatorArguments.getAuthMap().get("auth");
+        if (authMap != null) {
+
+            Map<String, Object> persona = (Map<String, Object>) authMap.get("persona");
+            if (persona != null) {
+                String email = (String) persona.get("email");
+                authorizer = new PersonaAuthorizer(email);
+            }
+            Map<String, Object> facebook = (Map<String, Object>) authMap.get("facebook");
+            if (facebook != null) {
+                String email = (String) facebook.get("email");
+                authorizer = new FacebookAuthorizer(email);
+            }
+
+        }
+
         try {
             remote = new URL(remoteStr);
         } catch (MalformedURLException e) {
@@ -591,8 +626,10 @@ public final class Manager {
 
             // https://github.com/couchbase/couchbase-lite-java-core/issues/43
             if(replicatorArguments.getPush()) {
-                ((Pusher)repl).setCreateTarget(replicatorArguments.getCreateTarget());
+				repl.setCreateTarget(replicatorArguments.getCreateTarget());
             }
+
+
         } else {
             // Cancel replication:
             // https://github.com/couchbase/couchbase-lite-java-core/issues/43

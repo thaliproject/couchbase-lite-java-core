@@ -33,6 +33,7 @@ public class ReplicatorArguments {
     private final Map<String, Object> rawProperties;
     private final Map<String, Object> queryParams;
     private final Map<String, Object> headers;
+    private final Map<String, Object> authMap;
     private String source;
     private String target;
     private final Map<String, Object> sourceAuth;
@@ -77,6 +78,8 @@ public class ReplicatorArguments {
         }
 
         push =  Manager.isValidDatabaseName(getSource());
+
+        authMap = push ? targetMap : sourceMap;
 
         filterName = (String)properties.get(filterFieldName);
         // End taken from manager.java
@@ -135,6 +138,8 @@ public class ReplicatorArguments {
     public Map<String, Object> getTargetAuth() {
         return targetAuth;
     }
+
+    public Map<String, Object> getAuthMap() { return authMap; }
 
     /**
      * If true then data from a local database (source) is being pushed to a remote database (target). If false then data from

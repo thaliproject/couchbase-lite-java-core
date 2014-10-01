@@ -1,8 +1,24 @@
 package com.couchbase.lite.router;
 
 
-import com.couchbase.lite.*;
+import com.couchbase.lite.AsyncTask;
+import com.couchbase.lite.Attachment;
+import com.couchbase.lite.BlobStoreWriter;
+import com.couchbase.lite.ChangesOptions;
+import com.couchbase.lite.CouchbaseLiteException;
+import com.couchbase.lite.Database;
 import com.couchbase.lite.Database.TDContentOptions;
+import com.couchbase.lite.DocumentChange;
+import com.couchbase.lite.Manager;
+import com.couchbase.lite.Mapper;
+import com.couchbase.lite.Misc;
+import com.couchbase.lite.QueryOptions;
+import com.couchbase.lite.QueryRow;
+import com.couchbase.lite.Reducer;
+import com.couchbase.lite.ReplicationFilter;
+import com.couchbase.lite.RevisionList;
+import com.couchbase.lite.Status;
+import com.couchbase.lite.View;
 import com.couchbase.lite.View.TDViewCollation;
 import com.couchbase.lite.auth.FacebookAuthorizer;
 import com.couchbase.lite.auth.PersonaAuthorizer;
@@ -10,6 +26,7 @@ import com.couchbase.lite.internal.AttachmentInternal;
 import com.couchbase.lite.internal.Body;
 import com.couchbase.lite.internal.RevisionInternal;
 import com.couchbase.lite.replicator.Replication;
+import com.couchbase.lite.replicator.ReplicationState;
 import com.couchbase.lite.storage.SQLException;
 import com.couchbase.lite.support.Version;
 import com.couchbase.lite.util.Log;
@@ -26,7 +43,15 @@ import java.lang.reflect.Method;
 import java.net.MalformedURLException;
 import java.net.URL;
 import java.net.URLDecoder;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.EnumSet;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
@@ -617,7 +642,27 @@ public class Router implements Database.ChangeListener {
         boolean cancel = (cancelBoolean != null && cancelBoolean);
 
         if(!cancel) {
+            final CountDownLatch replicationStarted = new CountDownLatch(1);
+            replicator.addChangeListener(new Replication.ChangeListener() {
+                @Override
+                public void changed(Replication.ChangeEvent event) {
+                    if (event.getTransition() != null && event.getTransition().getDestination() == ReplicationState.RUNNING) {
+                        replicationStarted.countDown();
+                    }
+                }
+            });
+
             replicator.start();
+
+            if (replicator.getSessionID() == null) {
+                // wait for replication to start, otherwise replicator.getSessionId() will return null
+                try {
+                    replicationStarted.await();
+                } catch (InterruptedException e) {
+                    throw new RuntimeException(e);
+                }
+            }
+
             Map<String,Object> result = new HashMap<String,Object>();
             result.put("session_id", replicator.getSessionID());
             result.put("ok", true); // https://github.com/couchbase/couchbase-lite-java-core/issues/48
